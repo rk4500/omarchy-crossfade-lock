@@ -472,8 +472,8 @@ Item {
     id: unlockOverlayDropTimer
     // Shorter than the lock-entrance crossfade (450ms) on purpose — you're
     // far more impatient leaving the lock screen than arriving at it.
-    // Matches unlockFadeView's 250ms opacity Behavior + a small buffer.
-    interval: 280
+    // Matches unlockFadeView's 200ms opacity Behavior + a small buffer.
+    interval: 230
     repeat: false
     onTriggered: {
       root.hideTransitionOverlay();
@@ -908,7 +908,7 @@ Item {
       opacity: root.unlockCrossfadeTrigger ? 0 : 1
       Behavior on opacity {
         // Shorter than the lock-entrance's 450ms — see unlockOverlayDropTimer.
-        NumberAnimation { duration: 250; easing.type: Easing.OutCubic }
+        NumberAnimation { duration: 200; easing.type: Easing.OutCubic }
       }
     }
 
