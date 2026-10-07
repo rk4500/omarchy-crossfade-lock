@@ -39,25 +39,25 @@ Item {
   property bool lockRequested: false
   property bool pendingSessionLock: false
 
-  // Lock-transition crossfade: grab the live desktop once via `grim`, show
-  // it full-screen in a non-secure overlay (pixel-identical to what's
-  // already on screen, so showing it is imperceptible), then crossfade to
-  // the blurred lock content while the real secure surface maps underneath
-  // — invisibly, since the overlay already covers it with matching content.
-  // This is NOT the compositor animating the secure surface (that's
-  // protocol-forbidden); it's our own content crossfading in a surface we
-  // fully control, with the real lock swapped in only once already hidden
-  // behind it. The overlay grabs keyboard/pointer exclusively from its
-  // first frame — the session isn't protocol-locked until `secure`, but
-  // nothing behind it is reachable while it's up.
+  // Lock-transition crossfade: capture the live desktop once via
+  // Quickshell's native ScreencopyView, show it full-screen in a non-secure
+  // overlay (pixel-identical to what's already on screen, so showing it is
+  // imperceptible), then crossfade to the blurred lock content while the
+  // real secure surface maps underneath — invisibly, since the overlay
+  // already covers it with matching content. This is NOT the compositor
+  // animating the secure surface (that's protocol-forbidden); it's our own
+  // content crossfading in a surface we fully control, with the real lock
+  // swapped in only once already hidden behind it. The overlay grabs
+  // keyboard/pointer exclusively from its first frame — the session isn't
+  // protocol-locked until `secure`, but nothing behind it is reachable
+  // while it's up.
+  //
+  // ScreencopyView (in-process, GPU texture, no subprocess/disk I/O)
+  // measured ~60ms to hasContent on this machine — over 10x faster than
+  // shelling out to `grim`, which it replaced. No temp file either, so
+  // there's nothing to clean up or leak on disk.
   property bool transitionOverlayVisible: false
-  property bool transitionGrabReady: false
   property bool transitionCrossfadeTrigger: false
-  property int transitionGrabVersion: 0
-  // JPEG, not PNG: grim's PNG encoding (zlib) measured ~750ms on this
-  // machine — JPEG is ~120ms. It's crossfaded away within half a second,
-  // so compression artifacts are irrelevant.
-  readonly property string transitionGrabPath: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/archer-lock-grab.jpg"
   property bool authenticatingPassword: false
   property bool fingerprintAuthenticating: false
   property bool passwordPamConfigured: false
@@ -386,7 +386,7 @@ Item {
         root.refreshBackground();
         root.refreshFingerprintStatus();
       });
-    root.startTransitionGrab();
+    root.showTransitionOverlay();
     return true;
   }
 
@@ -398,7 +398,6 @@ Item {
     sessionLockStabilizeTimer.stop();
     pendingSessionLockTimer.stop();
     root.hideTransitionOverlay();
-    transitionGrabCleanupProc.running = true;
     resetAuthenticationState();
     idleBlankTimer.stop();
     sessionLock.locked = false;
@@ -557,59 +556,37 @@ Item {
     command: ["mkdir", "-p", root.blurredDir]
   }
 
-  function startTransitionGrab() {
-    if (grimProc.running)
-      return;
-    grimProc.command = ["sh", "-c", "umask 077; exec grim -t jpeg -q 80 \"$1\"", "grim-wrapper", root.transitionGrabPath];
-    grimWatchdog.restart();
-    grimProc.running = true;
-  }
-
-  Timer {
-    id: grimWatchdog
-    interval: 500 // measured ~120ms for jpeg; generous margin over that
-    repeat: false
-    onTriggered: {
-      if (grimProc.running)
-        root.killProc(grimProc);
-    }
-  }
-
-  Process {
-    id: grimProc
-    onExited: function (exitCode) {
-      grimWatchdog.stop();
-      if (exitCode === 0 && root.lockRequested) {
-        root.transitionGrabVersion += 1;
-        root.transitionGrabReady = true;
-        root.showTransitionOverlay();
-      } else {
-        // grim unavailable/slow/failed — never let a screenshot block the
-        // actual lock; fall straight through to the plain (no-crossfade) path.
-        root.awaitBackgroundThenLock();
-      }
-    }
-  }
-
   function showTransitionOverlay() {
     if (!root.lockRequested)
       return;
+    // Showing the overlay is what starts the capture — ScreencopyView
+    // only actually captures once its window is mapped/rendering (same
+    // reason a live GPU blur can't converge before mapping, established
+    // earlier with the MultiEffect approach this replaced).
     root.transitionOverlayVisible = true;
-    transitionSettleTimer.restart();
+    transitionCaptureWatchdog.restart();
+  }
+
+  // Called from the ScreencopyView's onHasContentChanged, once it's
+  // actually captured a frame (measured ~60ms on this machine).
+  function onTransitionCaptureReady() {
+    if (!root.lockRequested || root.transitionCrossfadeTrigger)
+      return;
+    transitionCaptureWatchdog.stop();
+    root.transitionCrossfadeTrigger = true;
+    transitionCrossfadeCompleteTimer.restart();
   }
 
   Timer {
-    id: transitionSettleTimer
-    // One brief tick to guarantee the overlay's first frame (the grab,
-    // pixel-identical to the live desktop) has actually been presented
-    // before we start animating it away.
-    interval: 32
+    id: transitionCaptureWatchdog
+    // Generous: capture itself measured ~60ms. If it never arrives (no
+    // compositor support, odd screen state, etc.), never let it block the
+    // actual lock — skip straight to mapping with no crossfade.
+    interval: 600
     repeat: false
     onTriggered: {
-      if (!root.lockRequested)
-        return;
-      root.transitionCrossfadeTrigger = true;
-      transitionCrossfadeCompleteTimer.restart();
+      if (root.lockRequested && !root.transitionCrossfadeTrigger)
+        root.awaitBackgroundThenLock();
     }
   }
 
@@ -633,12 +610,6 @@ Item {
   function hideTransitionOverlay() {
     root.transitionOverlayVisible = false;
     root.transitionCrossfadeTrigger = false;
-    root.transitionGrabReady = false;
-  }
-
-  Process {
-    id: transitionGrabCleanupProc
-    command: ["rm", "-f", root.transitionGrabPath]
   }
 
   WlSessionLock {
@@ -799,24 +770,33 @@ Item {
     }
 
     // Sharp live-desktop snapshot, on top — crossfades out to reveal the
-    // blurred lock content underneath.
-    Image {
-      id: transitionGrabImage
+    // blurred lock content underneath. live:false means a single capture,
+    // not a continuous feed — nothing new can appear in it after the one
+    // frame lands, unlike a "blur the live desktop behind a transparent
+    // surface" approach, which would keep exposing real-time content.
+    ScreencopyView {
+      id: transitionCapture
       anchors.fill: parent
-      source: root.transitionOverlayVisible && root.transitionGrabReady
-        ? ("file://" + root.transitionGrabPath + "?v=" + root.transitionGrabVersion)
-        : ""
-      // Must not be empty-then-pop on its very first frame — it has to be
-      // pixel-identical to the live desktop the instant this overlay
-      // appears, so the decode is forced synchronous here rather than
-      // raced asynchronously like every other image in this plugin.
-      asynchronous: false
-      fillMode: Image.PreserveAspectCrop
-      cache: false
+      captureSource: root.transitionOverlayVisible && Quickshell.screens.length > 0 ? Quickshell.screens[0] : null
+      live: false
       opacity: root.transitionCrossfadeTrigger ? 0 : 1
       Behavior on opacity {
         NumberAnimation { duration: 450; easing.type: Easing.OutCubic }
       }
+      onHasContentChanged: {
+        if (hasContent)
+          root.onTransitionCaptureReady();
+      }
+    }
+
+    // Covers only the brief (~60ms measured) gap before the capture above
+    // has its first frame — same Color.background the real lock surface
+    // starts from, so there's no color mismatch. Gone as soon as
+    // hasContent is true, handing off to the capture above it.
+    Rectangle {
+      anchors.fill: parent
+      color: Color.background
+      visible: !transitionCapture.hasContent
     }
 
     // Not yet protocol-secure, so input must be swallowed here explicitly.
