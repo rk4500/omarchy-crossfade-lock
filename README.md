@@ -27,14 +27,11 @@ A personal fork of [Better Lock](https://github.com/BibekBhusal0/omarchy-better-
 - Separate password and fingerprint PAM flows
 - Keyboard navigation across every control
 
-![Upstream preview](preview.png)
-
-*The screenshot above is Better Lock's, and still shows the media widget and "Forgot password" that this fork removes.*
-
 ## Requirements
 
 - Omarchy quattro
-- ImageMagick (`magick`) for the blurred background
+- ImageMagick (`magick`) for the blurred background (external dependency; not bundled)
+- `systemctl` for the Sleep button (`systemctl suspend`)
 
 ## Install
 

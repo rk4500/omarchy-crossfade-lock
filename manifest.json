@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "archer.lock",
   "name": "Archer Lock",
-  "version": "1.0.6",
-  "author": "archer",
-  "description": "Personal fork of Bibek Bhusal's Better Lock: date/time, power controls, crossfade-from-desktop transition, no forgot-password prompt or media widget.",
-  "homepage": "https://github.com/BibekBhusal0/omarchy-better-lock",
+  "version": "1.1.0",
+  "author": "rk4500",
+  "description": "Fork of Better Lock by Bibek Bhusal: crossfade into and out of the lock screen, pre-baked blurred wallpaper, no forgot-password prompt or media widget.",
+  "homepage": "https://github.com/rk4500/omarchy-better-lock",
   "kinds": [
     "service"
   ],
