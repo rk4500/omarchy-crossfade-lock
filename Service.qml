@@ -110,7 +110,7 @@ Item {
   // a live MultiEffect blur can't converge before the surface is shown no
   // matter how long we wait beforehand; baking the blur into a file sidesteps
   // that entirely; the lock view just displays a plain already-blurred image.
-  readonly property string blurredDir: stateRoot + "/archer-lock"
+  readonly property string blurredDir: stateRoot + "/crossfade-lock"
   readonly property string blurredBackgroundPath: blurredDir + "/blurred-bg.png"
   property int blurredBackgroundVersion: 0
   property bool blurredBackgroundReady: false
@@ -865,7 +865,7 @@ Item {
       right: true
     }
     color: "transparent"
-    WlrLayershell.namespace: "archer-lock-transition"
+    WlrLayershell.namespace: "crossfade-lock-transition"
     WlrLayershell.layer: WlrLayer.Overlay
     WlrLayershell.keyboardFocus: root.transitionContentActive ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
     exclusionMode: ExclusionMode.Ignore

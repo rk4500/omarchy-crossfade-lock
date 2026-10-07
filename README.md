@@ -20,7 +20,7 @@ A personal fork of [Better Lock](https://github.com/BibekBhusal0/omarchy-better-
 
 **Renamed**
 
-- Cache and namespace paths use `archer-lock` instead of `bibek-lock`, so its cache doesn't collide with the original's. Only one lock plugin should be enabled at a time.
+- Cache and layer-namespace names use `crossfade-lock` instead of `bibek-lock`, so its cache (`~/.local/state/omarchy/crossfade-lock/`) does not collide with the original's. Only one lock plugin should be enabled at a time.
 
 ## Inherited from Better Lock
 
