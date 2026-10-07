@@ -1,39 +1,55 @@
-# Better Lock
+# archer.lock
 
-A custom lock screen service for Omarchy, cloned from the built-in `omarchy.lock`.
+A personal fork of [Better Lock](https://github.com/BibekBhusal0/omarchy-better-lock) by Bibek Bhusal (MIT), which is itself a clone of Omarchy's built-in `omarchy.lock`. All the date/time display, power controls and PAM authentication work comes from Bibek's plugin; this fork changes how it looks and behaves around locking and unlocking, and trims two features.
 
-![Better Lock preview](preview.png)
+## What this fork changes
 
-## Features
+**Added**
 
-From the built-in `omarchy.lock`:
+- **Crossfade into the lock screen.** The live desktop is grabbed (with Quickshell's native `ScreencopyView`, no subprocess) and cross-fades into the blurred lock content before the real session-lock surface maps underneath it, so there is no black flash.
+- **Crossfade out on unlock.** The real lock is released first, then a pre-matched overlay fades to the desktop (200 ms). The overlay window stays mapped for the whole locked session so the unlock hand-off doesn't have to create a new surface mid-animation, which was the cause of an intermittent flicker.
+- **Pre-baked blur.** The blurred wallpaper is rendered once to a cached PNG with ImageMagick whenever the wallpaper changes, instead of blurring on the GPU at every lock. A session-lock surface gets no render frames until it is mapped, so a live blur can never be ready in time.
+- **Faster background load.** The wallpaper starts decoding when the lock is requested, not after the lock surface appears, which removes the black flash before the wallpaper shows.
 
-- Password and fingerprint PAM authentication with session lock handling
+**Removed**
 
-New in this clone:
+- The "Forgot password" prompt.
+- The integrated MPRIS media widget.
 
-- Big customizable date and time display above the password input field
-- Power action controls at the bottom for Shutdown, Restart, and Sleep
-- Integrated MPRIS media widget showing currently playing track title, artist, and playback controls (previous, play/pause, next)
-- Security prompt for "Forgot password" that alerts and blanks the screen
-- Separate password and fingerprint PAM authentication flows
-- Full keyboard navigation across every control
+**Renamed**
+
+- Cache and namespace paths use `archer-lock` instead of `bibek-lock`, so its cache doesn't collide with the original's. Only one lock plugin should be enabled at a time.
+
+## Inherited from Better Lock
+
+- Large, configurable date and time above the password field
+- Shutdown / Restart / Sleep controls
+- Separate password and fingerprint PAM flows
+- Keyboard navigation across every control
+
+![Upstream preview](preview.png)
+
+*The screenshot above is Better Lock's, and still shows the media widget and "Forgot password" that this fork removes.*
 
 ## Requirements
 
 - Omarchy quattro
+- ImageMagick (`magick`) for the blurred background
 
 ## Install
 
-This is a personal clone of the built-in `omarchy.lock`; on this machine it lives in the shell plugin monorepo and is installed under the id `bibek.lock`. To install from the standalone repo on a fresh system:
-
 ```bash
-omarchy plugin add https://github.com/BibekBhusal0/omarchy-better-lock.git --enable
+omarchy plugin add https://github.com/rk4500/omarchy-better-lock.git --enable
+omarchy plugin disable omarchy.lock   # only one lock service at a time
+omarchy plugin disable bibek.lock     # if you have Better Lock installed
+omarchy restart shell
 ```
+
+`omarchy plugin update` pulls from this repo, not from Bibek's. Upstream changes have to be merged here by hand.
 
 ## Configuration
 
-Options live in `~/.config/omarchy/lock.json` (watched live, so edits apply instantly):
+Options live in `~/.config/omarchy/lock.json` (watched live):
 
 ```json
 {
@@ -45,24 +61,13 @@ Options live in `~/.config/omarchy/lock.json` (watched live, so edits apply inst
 ## Uninstall
 
 ```bash
-omarchy plugin remove bibek.lock
+omarchy plugin remove archer.lock
+omarchy plugin enable omarchy.lock
 ```
 
 ## Credits
 
-Lock screen service and layout adapted from the built-in `omarchy.lock` by the Omarchy team.
+- [Better Lock](https://github.com/BibekBhusal0/omarchy-better-lock) by [Bibek Bhusal](https://github.com/BibekBhusal0) (MIT): the plugin this is forked from, including the layout, date/time and power controls. Bibek's repo also has contributions from [tug-benson](https://github.com/tug-benson).
+- Omarchy's built-in `omarchy.lock` by the Omarchy team, from which Better Lock was cloned.
 
-This plugin is licensed under the [MIT License](LICENSE).
-
-## Others
-
-Here are my other Omarchy plugins:
-
-- [Focusd](https://github.com/BibekBhusal0/omarchy-focusd) - pomodoro timer with streak, history and daily goal
-- [Better Media](https://github.com/BibekBhusal0/omarchy-better-media) - MPRIS now-playing with playback controls
-- [Better Menu](https://github.com/BibekBhusal0/omarchy-better-menu) - fuzzy menu with app grid, calculator and web search
-- [Obsidian Search](https://github.com/BibekBhusal0/omarchy-obsidian-search) - fuzzy-search your Obsidian vault
-- [Readest](https://github.com/BibekBhusal0/omarchy-readest) - fuzzy-search your Readest library
-- [Youtube Video Downloader](https://github.com/BibekBhusal0/omarchy-ytdl) - video downloads with progress and history
-
-Please give a star if you find them useful!
+Licensed under the [MIT License](LICENSE); the original copyright notice is kept.
