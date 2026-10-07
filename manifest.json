@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "id": "archer.lock",
+  "id": "io.github.rk4500.archer-lock",
   "name": "Archer Lock",
   "version": "1.1.0",
   "author": "rk4500",

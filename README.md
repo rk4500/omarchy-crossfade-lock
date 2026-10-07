@@ -1,4 +1,4 @@
-# archer.lock
+# Archer Lock
 
 A personal fork of [Better Lock](https://github.com/BibekBhusal0/omarchy-better-lock) by Bibek Bhusal (MIT), which is itself a clone of Omarchy's built-in `omarchy.lock`. All the date/time display, power controls and PAM authentication work comes from Bibek's plugin; this fork changes how it looks and behaves around locking and unlocking, and trims two features.
 
@@ -58,7 +58,7 @@ Options live in `~/.config/omarchy/lock.json` (watched live):
 ## Uninstall
 
 ```bash
-omarchy plugin remove archer.lock
+omarchy plugin remove io.github.rk4500.archer-lock
 omarchy plugin enable omarchy.lock
 ```
 
