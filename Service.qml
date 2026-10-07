@@ -57,7 +57,7 @@ Item {
   // JPEG, not PNG: grim's PNG encoding (zlib) measured ~750ms on this
   // machine — JPEG is ~120ms. It's crossfaded away within half a second,
   // so compression artifacts are irrelevant.
-  readonly property string transitionGrabPath: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/bibek-lock-grab.jpg"
+  readonly property string transitionGrabPath: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/archer-lock-grab.jpg"
   property bool authenticatingPassword: false
   property bool fingerprintAuthenticating: false
   property bool passwordPamConfigured: false
@@ -79,7 +79,7 @@ Item {
   // a live MultiEffect blur can't converge before the surface is shown no
   // matter how long we wait beforehand; baking the blur into a file sidesteps
   // that entirely; the lock view just displays a plain already-blurred image.
-  readonly property string blurredDir: stateRoot + "/bibek-lock"
+  readonly property string blurredDir: stateRoot + "/archer-lock"
   readonly property string blurredBackgroundPath: blurredDir + "/blurred-bg.png"
   property int blurredBackgroundVersion: 0
   property bool blurredBackgroundReady: false
@@ -776,7 +776,7 @@ Item {
       right: true
     }
     color: "transparent"
-    WlrLayershell.namespace: "bibek-lock-transition"
+    WlrLayershell.namespace: "archer-lock-transition"
     WlrLayershell.layer: WlrLayer.Overlay
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
     exclusionMode: ExclusionMode.Ignore
