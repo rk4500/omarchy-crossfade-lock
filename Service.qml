@@ -38,6 +38,26 @@ Item {
 
   property bool lockRequested: false
   property bool pendingSessionLock: false
+
+  // Lock-transition crossfade: grab the live desktop once via `grim`, show
+  // it full-screen in a non-secure overlay (pixel-identical to what's
+  // already on screen, so showing it is imperceptible), then crossfade to
+  // the blurred lock content while the real secure surface maps underneath
+  // — invisibly, since the overlay already covers it with matching content.
+  // This is NOT the compositor animating the secure surface (that's
+  // protocol-forbidden); it's our own content crossfading in a surface we
+  // fully control, with the real lock swapped in only once already hidden
+  // behind it. The overlay grabs keyboard/pointer exclusively from its
+  // first frame — the session isn't protocol-locked until `secure`, but
+  // nothing behind it is reachable while it's up.
+  property bool transitionOverlayVisible: false
+  property bool transitionGrabReady: false
+  property bool transitionCrossfadeTrigger: false
+  property int transitionGrabVersion: 0
+  // JPEG, not PNG: grim's PNG encoding (zlib) measured ~750ms on this
+  // machine — JPEG is ~120ms. It's crossfaded away within half a second,
+  // so compression artifacts are irrelevant.
+  readonly property string transitionGrabPath: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/bibek-lock-grab.jpg"
   property bool authenticatingPassword: false
   property bool fingerprintAuthenticating: false
   property bool passwordPamConfigured: false
@@ -49,6 +69,23 @@ Item {
   property int failedAttempts: 0
   property string backgroundPath: ""
   property int backgroundVersion: 0
+  // True once the background-path lookup has completed at least once
+  // (whether it found a path or not) — distinguishes "still fetching" from
+  // "fetched, no background configured" so the lock doesn't wait forever.
+  property bool backgroundResolved: false
+
+  // Blurring is done once, on disk, via `magick` — not live on the GPU.
+  // An ext-session-lock surface gets zero render frames while unmapped, so
+  // a live MultiEffect blur can't converge before the surface is shown no
+  // matter how long we wait beforehand; baking the blur into a file sidesteps
+  // that entirely; the lock view just displays a plain already-blurred image.
+  readonly property string blurredDir: stateRoot + "/bibek-lock"
+  readonly property string blurredBackgroundPath: blurredDir + "/blurred-bg.png"
+  property int blurredBackgroundVersion: 0
+  property bool blurredBackgroundReady: false
+  property string blurredSourcePath: ""
+
+  readonly property bool backgroundReady: root.backgroundResolved && root.blurredBackgroundReady
   property string lastEvent: "init"
   property string lastEventAt: ""
   property bool strandedLock: false
@@ -190,6 +227,43 @@ Item {
       pendingSessionLockTimer.start();
   }
 
+  // Don't map the lock surface until the wallpaper has actually finished
+  // decoding — otherwise the surface becomes visible (compositor "secure",
+  // ~500ms after queueSessionLock()) before the image is ready and you see
+  // plain Color.background for a beat. Bounded by backgroundWaitWatchdog so
+  // a broken/missing wallpaper can never delay the actual lock indefinitely.
+  function awaitBackgroundThenLock() {
+    if (!root.lockRequested || sessionLock.locked || sessionLock.secure)
+      return;
+    if (root.backgroundReady) {
+      backgroundWaitWatchdog.stop();
+      queueSessionLock();
+    } else if (!backgroundWaitWatchdog.running) {
+      logEvent("lock-pending: waiting-for-background");
+      backgroundWaitWatchdog.restart();
+    }
+  }
+
+  onBackgroundReadyChanged: {
+    if (root.lockRequested)
+      root.awaitBackgroundThenLock();
+  }
+
+  Timer {
+    id: backgroundWaitWatchdog
+    // Generous: covers a cold-start `magick` blur run (first lock ever, or
+    // right after a theme change). Every lock after that hits the cached
+    // blurred-bg.png and resolves near-instantly, well under this.
+    interval: 1800
+    repeat: false
+    onTriggered: {
+      if (root.lockRequested && !sessionLock.locked && !sessionLock.secure) {
+        logEvent("lock-pending: background-wait-timeout");
+        queueSessionLock();
+      }
+    }
+  }
+
   function requestSessionLock() {
     if (!lockRequested || sessionLock.locked || sessionLock.secure)
       return;
@@ -308,11 +382,11 @@ Item {
     lockRequested = true;
     armBlankTimer();
     logEvent("lock-requested");
-    queueSessionLock();
     Qt.callLater(function () {
         root.refreshBackground();
         root.refreshFingerprintStatus();
       });
+    root.startTransitionGrab();
     return true;
   }
 
@@ -323,6 +397,8 @@ Item {
     pendingSessionLock = false;
     sessionLockStabilizeTimer.stop();
     pendingSessionLockTimer.stop();
+    root.hideTransitionOverlay();
+    transitionGrabCleanupProc.running = true;
     resetAuthenticationState();
     idleBlankTimer.stop();
     sessionLock.locked = false;
@@ -429,6 +505,142 @@ Item {
     }
   }
 
+  function generateBlurredBackground(sourcePath) {
+    if (!sourcePath) {
+      root.blurredBackgroundReady = true;
+      return;
+    }
+    if (sourcePath === root.blurredSourcePath && root.blurredBackgroundReady)
+      return;
+    if (blurProc.running)
+      return;
+    blurProc.pendingSource = sourcePath;
+    blurProc.command = [
+      "magick", sourcePath,
+      "-resize", "50%",
+      "-blur", "0x24",
+      "-brightness-contrast", "0x-12",
+      root.blurredBackgroundPath
+    ];
+    blurWatchdog.restart();
+    blurProc.running = true;
+  }
+
+  Timer {
+    id: blurWatchdog
+    interval: 4000
+    repeat: false
+    onTriggered: {
+      if (blurProc.running)
+        root.killProc(blurProc);
+    }
+  }
+
+  Process {
+    id: blurProc
+    property string pendingSource: ""
+    onExited: function (exitCode) {
+      blurWatchdog.stop();
+      if (exitCode === 0)
+        root.blurredSourcePath = blurProc.pendingSource;
+      else
+        console.warn("bibek.lock: blur generation failed for", blurProc.pendingSource);
+      // Fail open either way — never let a broken/slow blur step block
+      // an actual lock from ever becoming ready.
+      root.blurredBackgroundVersion += 1;
+      root.blurredBackgroundReady = true;
+    }
+  }
+
+  Process {
+    id: blurredDirProc
+    command: ["mkdir", "-p", root.blurredDir]
+  }
+
+  function startTransitionGrab() {
+    if (grimProc.running)
+      return;
+    grimProc.command = ["sh", "-c", "umask 077; exec grim -t jpeg -q 80 \"$1\"", "grim-wrapper", root.transitionGrabPath];
+    grimWatchdog.restart();
+    grimProc.running = true;
+  }
+
+  Timer {
+    id: grimWatchdog
+    interval: 500 // measured ~120ms for jpeg; generous margin over that
+    repeat: false
+    onTriggered: {
+      if (grimProc.running)
+        root.killProc(grimProc);
+    }
+  }
+
+  Process {
+    id: grimProc
+    onExited: function (exitCode) {
+      grimWatchdog.stop();
+      if (exitCode === 0 && root.lockRequested) {
+        root.transitionGrabVersion += 1;
+        root.transitionGrabReady = true;
+        root.showTransitionOverlay();
+      } else {
+        // grim unavailable/slow/failed — never let a screenshot block the
+        // actual lock; fall straight through to the plain (no-crossfade) path.
+        root.awaitBackgroundThenLock();
+      }
+    }
+  }
+
+  function showTransitionOverlay() {
+    if (!root.lockRequested)
+      return;
+    root.transitionOverlayVisible = true;
+    transitionSettleTimer.restart();
+  }
+
+  Timer {
+    id: transitionSettleTimer
+    // One brief tick to guarantee the overlay's first frame (the grab,
+    // pixel-identical to the live desktop) has actually been presented
+    // before we start animating it away.
+    interval: 32
+    repeat: false
+    onTriggered: {
+      if (!root.lockRequested)
+        return;
+      root.transitionCrossfadeTrigger = true;
+      transitionCrossfadeCompleteTimer.restart();
+    }
+  }
+
+  // ext-session-lock surfaces render above every layer-shell surface
+  // unconditionally, by protocol — our overlay cannot stay "on top" once
+  // the real surface maps, no matter what layer/z it requests. So the real
+  // surface must not map until the overlay's own crossfade has *finished*;
+  // mapping it mid-animation means the real surface jumps to the top and
+  // cuts the crossfade off, showing its own black start underneath it.
+  Timer {
+    id: transitionCrossfadeCompleteTimer
+    interval: 480 // matches the crossfade's 450ms duration + a small buffer
+    repeat: false
+    onTriggered: {
+      if (!root.lockRequested)
+        return;
+      root.awaitBackgroundThenLock();
+    }
+  }
+
+  function hideTransitionOverlay() {
+    root.transitionOverlayVisible = false;
+    root.transitionCrossfadeTrigger = false;
+    root.transitionGrabReady = false;
+  }
+
+  Process {
+    id: transitionGrabCleanupProc
+    command: ["rm", "-f", root.transitionGrabPath]
+  }
+
   WlSessionLock {
     id: sessionLock
 
@@ -441,6 +653,9 @@ Item {
         sessionLockStabilizeTimer.stop();
         pendingSessionLockTimer.stop();
         root.startFingerprint();
+        // The real secure surface is now showing equivalent content
+        // underneath — safe to drop the transition overlay.
+        root.hideTransitionOverlay();
       }
     }
 
@@ -468,14 +683,17 @@ Item {
       LockView {
         id: lockView
         anchors.fill: parent
-        backgroundPath: root.backgroundPath
-        backgroundVersion: root.backgroundVersion
+        blurredBackgroundPath: root.blurredBackgroundPath
+        blurredBackgroundVersion: root.blurredBackgroundVersion
         fingerprintConfigured: root.fingerprintConfigured
         authenticatingPassword: root.authenticatingPassword
         failureMessage: root.failureMessage
         failedAttempts: root.failedAttempts
         inputEnabled: root.lockRequested
-        loadBackground: root.locked
+        // Starts decoding at lockRequested (top of the stabilize window),
+        // not at locked (after the surface maps) — gives the image the
+        // whole pre-map window to be ready instead of starting cold.
+        loadBackground: root.locked || root.lockRequested
         passwordText: root.enteredPassword
         userName: root.userName
         timeFormat: root.timeFormat
@@ -513,8 +731,8 @@ Item {
 
     LockView {
       anchors.fill: parent
-      backgroundPath: root.backgroundPath
-      backgroundVersion: root.backgroundVersion
+      blurredBackgroundPath: root.blurredBackgroundPath
+      blurredBackgroundVersion: root.blurredBackgroundVersion
       fingerprintConfigured: root.fingerprintConfigured
       authenticatingPassword: false
       failureMessage: ""
@@ -536,6 +754,81 @@ Item {
       anchors.fill: parent
       acceptedButtons: Qt.LeftButton | Qt.RightButton
       onClicked: root.previewVisible = false
+    }
+  }
+
+  // Lock-transition crossfade overlay. Shows a `grim` snapshot of the live
+  // desktop (pixel-identical to what's already on screen — imperceptible to
+  // show), then crossfades it out over the same blurred-lock content the
+  // real surface will show, while that real surface maps underneath.
+  // WlrKeyboardFocus.Exclusive + the full-screen input-swallowing MouseArea
+  // below make this behave as locked from its first frame onward, even
+  // though the session isn't protocol-secure until the real surface beneath
+  // reports `secure` (see hideTransitionOverlay(), called from
+  // sessionLock.onSecureStateChanged).
+  PanelWindow {
+    id: transitionWindow
+    visible: root.transitionOverlayVisible
+    anchors {
+      top: true
+      bottom: true
+      left: true
+      right: true
+    }
+    color: "transparent"
+    WlrLayershell.namespace: "bibek-lock-transition"
+    WlrLayershell.layer: WlrLayer.Overlay
+    WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
+    exclusionMode: ExclusionMode.Ignore
+
+    // Target state, underneath — identical component to the real lock.
+    LockView {
+      anchors.fill: parent
+      blurredBackgroundPath: root.blurredBackgroundPath
+      blurredBackgroundVersion: root.blurredBackgroundVersion
+      fingerprintConfigured: root.fingerprintConfigured
+      authenticatingPassword: false
+      failureMessage: ""
+      failedAttempts: 0
+      inputEnabled: false
+      loadBackground: root.transitionOverlayVisible
+      passwordText: ""
+      userName: root.userName
+      timeFormat: root.timeFormat
+      dateFormat: root.dateFormat
+    }
+
+    // Sharp live-desktop snapshot, on top — crossfades out to reveal the
+    // blurred lock content underneath.
+    Image {
+      id: transitionGrabImage
+      anchors.fill: parent
+      source: root.transitionOverlayVisible && root.transitionGrabReady
+        ? ("file://" + root.transitionGrabPath + "?v=" + root.transitionGrabVersion)
+        : ""
+      // Must not be empty-then-pop on its very first frame — it has to be
+      // pixel-identical to the live desktop the instant this overlay
+      // appears, so the decode is forced synchronous here rather than
+      // raced asynchronously like every other image in this plugin.
+      asynchronous: false
+      fillMode: Image.PreserveAspectCrop
+      cache: false
+      opacity: root.transitionCrossfadeTrigger ? 0 : 1
+      Behavior on opacity {
+        NumberAnimation { duration: 450; easing.type: Easing.OutCubic }
+      }
+    }
+
+    // Not yet protocol-secure, so input must be swallowed here explicitly.
+    MouseArea {
+      anchors.fill: parent
+      hoverEnabled: true
+      acceptedButtons: Qt.AllButtons
+      onClicked: {}
+      onPositionChanged: {}
+      onWheel: function (wheel) {
+        wheel.accepted = true;
+      }
     }
   }
 
@@ -651,6 +944,10 @@ Item {
         root.backgroundPath = "";
         root.backgroundVersion += 1;
       }
+      root.backgroundResolved = true;
+      if (next !== root.blurredSourcePath)
+        root.blurredBackgroundReady = false;
+      root.generateBlurredBackground(next);
     }
   }
 
@@ -984,6 +1281,7 @@ Item {
   }
 
   Component.onCompleted: {
+    blurredDirProc.running = true;
     refreshBackground();
     refreshFingerprintStatus();
     checkStrandedLock();
