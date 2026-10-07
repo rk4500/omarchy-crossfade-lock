@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "id": "io.github.rk4500.archer-lock",
-  "name": "Archer Lock",
+  "id": "io.github.rk4500.crossfade-lock",
+  "name": "Crossfade Lock",
   "version": "1.1.0",
   "author": "rk4500",
   "description": "Fork of Better Lock by Bibek Bhusal: crossfade into and out of the lock screen, pre-baked blurred wallpaper, no forgot-password prompt or media widget.",
-  "homepage": "https://github.com/rk4500/omarchy-better-lock",
+  "homepage": "https://github.com/rk4500/omarchy-crossfade-lock",
   "kinds": [
     "service"
   ],
