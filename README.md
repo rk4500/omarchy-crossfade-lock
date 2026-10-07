@@ -2,6 +2,8 @@
 
 A personal fork of [Better Lock](https://github.com/BibekBhusal0/omarchy-better-lock) by Bibek Bhusal (MIT), which is itself a clone of Omarchy's built-in `omarchy.lock`. All the date/time display, power controls and PAM authentication work comes from Bibek's plugin; this fork changes how it looks and behaves around locking and unlocking, and trims two features.
 
+![Archer Lock](preview.png)
+
 ## What this fork changes
 
 **Added**
