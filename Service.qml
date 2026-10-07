@@ -56,7 +56,20 @@ Item {
   // measured ~60ms to hasContent on this machine — over 10x faster than
   // shelling out to `grim`, which it replaced. No temp file either, so
   // there's nothing to clean up or leak on disk.
+  // transitionOverlayVisible controls whether the overlay WINDOW is mapped
+  // at all. transitionContentActive controls whether it's actually
+  // grabbing focus/input and showing content. These are deliberately
+  // separate: toggling the window's mapped state on and off is a fresh
+  // surface-creation handshake with the compositor each time (not a warm
+  // repaint), which measurably doesn't complete on any fixed timer you'd
+  // want to wait on — confirmed by eye as "sometimes clean, sometimes the
+  // real desktop pops through first." So the window, once first shown, stays
+  // mapped continuously for the rest of the lock session; only
+  // transitionContentActive toggles per phase. By the time unlock needs it,
+  // the window has been warm for as long as you were locked, so a brief
+  // settle is reliable instead of a guess.
   property bool transitionOverlayVisible: false
+  property bool transitionContentActive: false
   property bool transitionCrossfadeTrigger: false
   // Unlock direction: on successful auth, pre-arm an overlay copy of the
   // current lock appearance (hidden behind the still-active secure
@@ -425,17 +438,29 @@ Item {
     if (root.unlockTransitionActive)
       return;
     root.unlockTransitionActive = true;
+    // Window has been mapped and warm since the lock-entrance transition
+    // (pauseTransitionOverlay left transitionOverlayVisible true) — just
+    // reactivating content/focus on an already-live surface, not a fresh
+    // mapping, so the settle below only needs to cover a repaint.
     root.transitionOverlayVisible = true;
+    root.transitionContentActive = true;
     root.unlockCrossfadeTrigger = false;
     unlockPrimeTimer.restart();
   }
 
   Timer {
     id: unlockPrimeTimer
-    // One brief tick to guarantee the overlay's hand-off frame (matching
-    // the real lock screen) has actually been presented before releasing
-    // the real surface out from under it.
-    interval: 32
+    // Guarantees the overlay's hand-off frame (matching the real lock
+    // screen) has actually been presented before releasing the real
+    // surface out from under it. This used to need a long, flaky delay
+    // because the window was being fully unmapped and remapped each time
+    // (a cold surface-creation handshake with the compositor, not a warm
+    // repaint) — confirmed by eye as "sometimes clean, sometimes the real
+    // desktop pops through first." Now that the window stays mapped
+    // continuously for the whole lock session (transitionContentActive),
+    // this only needs to cover a repaint on an already-live surface, not a
+    // fresh mapping.
+    interval: 48
     repeat: false
     onTriggered: root.releaseLock()
   }
@@ -636,6 +661,7 @@ Item {
     if (!root.lockRequested)
       return;
     root.transitionOverlayVisible = true;
+    root.transitionContentActive = true;
     // Explicit capture request each time you actually lock — captureSource
     // itself never changes (see transitionCapture), so without this call
     // every lock after the first would keep showing whatever was captured
@@ -684,8 +710,19 @@ Item {
     }
   }
 
+  // Content off, but the window itself stays mapped — see
+  // transitionContentActive's comment for why. Used once the lock-entrance
+  // crossfade has handed off to the real secure surface.
+  function pauseTransitionOverlay() {
+    root.transitionContentActive = false;
+    root.transitionCrossfadeTrigger = false;
+  }
+
+  // Full teardown, window included — only used once actually unlocked, at
+  // the very end of the unlock transition.
   function hideTransitionOverlay() {
     root.transitionOverlayVisible = false;
+    root.transitionContentActive = false;
     root.transitionCrossfadeTrigger = false;
     root.unlockCrossfadeTrigger = false;
   }
@@ -703,8 +740,10 @@ Item {
         pendingSessionLockTimer.stop();
         root.startFingerprint();
         // The real secure surface is now showing equivalent content
-        // underneath — safe to drop the transition overlay.
-        root.hideTransitionOverlay();
+        // underneath — safe to pause the transition overlay. Window stays
+        // mapped (pauseTransitionOverlay, not hideTransitionOverlay) so
+        // it's already warm if this same lock session ends in an unlock.
+        root.pauseTransitionOverlay();
       }
     }
 
@@ -806,15 +845,16 @@ Item {
     }
   }
 
-  // Lock-transition crossfade overlay. Shows a `grim` snapshot of the live
-  // desktop (pixel-identical to what's already on screen — imperceptible to
-  // show), then crossfades it out over the same blurred-lock content the
-  // real surface will show, while that real surface maps underneath.
-  // WlrKeyboardFocus.Exclusive + the full-screen input-swallowing MouseArea
-  // below make this behave as locked from its first frame onward, even
-  // though the session isn't protocol-secure until the real surface beneath
-  // reports `secure` (see hideTransitionOverlay(), called from
-  // sessionLock.onSecureStateChanged).
+  // Lock-transition crossfade overlay. Shows a live-desktop capture
+  // (pixel-identical to what's already on screen — imperceptible to show),
+  // then crossfades it out over the same blurred-lock content the real
+  // surface will show, while that real surface maps underneath. Stays
+  // mapped (visible) continuously once first shown for the whole lock
+  // session — only transitionContentActive toggles per phase — see the
+  // comment on that property. WlrKeyboardFocus only goes Exclusive, and the
+  // input-swallowing MouseArea only engages, while actually transitioning;
+  // otherwise this window sits inertly mapped, granting focus/input to
+  // whatever should actually have it.
   PanelWindow {
     id: transitionWindow
     visible: root.transitionOverlayVisible
@@ -827,94 +867,109 @@ Item {
     color: "transparent"
     WlrLayershell.namespace: "archer-lock-transition"
     WlrLayershell.layer: WlrLayer.Overlay
-    WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
+    WlrLayershell.keyboardFocus: root.transitionContentActive ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
     exclusionMode: ExclusionMode.Ignore
 
-    // Target state, underneath — identical component to the real lock.
-    LockView {
+    // Everything visible lives under one opacity gate: the window itself
+    // stays mapped for the whole lock session (see the comment above), but
+    // should show and composite NOTHING while merely sitting there idle
+    // between the lock-entrance finishing and an unlock actually starting.
+    Item {
       anchors.fill: parent
-      blurredBackgroundPath: root.blurredBackgroundPath
-      blurredBackgroundVersion: root.blurredBackgroundVersion
-      fingerprintConfigured: root.fingerprintConfigured
-      authenticatingPassword: false
-      failureMessage: ""
-      failedAttempts: 0
-      inputEnabled: false
-      loadBackground: root.transitionOverlayVisible
-      passwordText: ""
-      userName: root.userName
-      timeFormat: root.timeFormat
-      dateFormat: root.dateFormat
-    }
+      opacity: root.transitionContentActive ? 1 : 0
 
-    // Sharp live-desktop snapshot, on top — crossfades out to reveal the
-    // blurred lock content underneath. live:false means a single capture,
-    // not a continuous feed — nothing new can appear in it after the one
-    // frame lands, unlike a "blur the live desktop behind a transparent
-    // surface" approach, which would keep exposing real-time content.
-    ScreencopyView {
-      id: transitionCapture
-      anchors.fill: parent
-      // Deliberately NOT gated on transitionOverlayVisible: that would null
-      // captureSource on every hide, which counts as "changed" and forces
-      // a re-capture next time it's set — destroying the frame before the
-      // unlock path ever gets to reuse it. Kept permanently stable instead;
-      // showTransitionOverlay() calls captureFrame() explicitly to force a
-      // fresh grab each time you actually lock.
-      captureSource: Quickshell.screens.length > 0 ? Quickshell.screens[0] : null
-      live: false
-      opacity: root.transitionCrossfadeTrigger ? 0 : 1
-      Behavior on opacity {
-        NumberAnimation { duration: 450; easing.type: Easing.OutCubic }
+      // Target state, underneath — identical component to the real lock.
+      LockView {
+        anchors.fill: parent
+        blurredBackgroundPath: root.blurredBackgroundPath
+        blurredBackgroundVersion: root.blurredBackgroundVersion
+        fingerprintConfigured: root.fingerprintConfigured
+        authenticatingPassword: false
+        failureMessage: ""
+        failedAttempts: 0
+        inputEnabled: false
+        loadBackground: root.transitionOverlayVisible
+        passwordText: ""
+        userName: root.userName
+        timeFormat: root.timeFormat
+        dateFormat: root.dateFormat
       }
-      // Redundant with transitionCaptureSettleTimer, kept as a harmless
-      // fast-path for whenever this signal does fire correctly.
-      onHasContentChanged: {
-        if (hasContent)
-          root.onTransitionCaptureReady();
+
+      // Sharp live-desktop snapshot, on top — crossfades out to reveal the
+      // blurred lock content underneath. live:false means a single
+      // capture, not a continuous feed — nothing new can appear in it
+      // after the one frame lands, unlike a "blur the live desktop behind
+      // a transparent surface" approach, which would keep exposing
+      // real-time content.
+      ScreencopyView {
+        id: transitionCapture
+        anchors.fill: parent
+        // Deliberately NOT gated on transitionOverlayVisible: that would
+        // null captureSource on every hide, which counts as "changed" and
+        // forces a re-capture next time it's set — destroying the frame
+        // before the unlock path ever gets to reuse it. Kept permanently
+        // stable instead; showTransitionOverlay() calls captureFrame()
+        // explicitly to force a fresh grab each time you actually lock.
+        captureSource: Quickshell.screens.length > 0 ? Quickshell.screens[0] : null
+        live: false
+        opacity: root.transitionCrossfadeTrigger ? 0 : 1
+        Behavior on opacity {
+          NumberAnimation { duration: 450; easing.type: Easing.OutCubic }
+        }
+        // Redundant with transitionCaptureSettleTimer, kept as a harmless
+        // fast-path for whenever this signal does fire correctly.
+        onHasContentChanged: {
+          if (hasContent)
+            root.onTransitionCaptureReady();
+        }
+      }
+
+      // Covers only the brief (~60ms measured) gap before the capture
+      // above has its first frame — same Color.background the real lock
+      // surface starts from, so there's no color mismatch. Gone as soon
+      // as hasContent is true, handing off to the capture above it.
+      Rectangle {
+        anchors.fill: parent
+        color: Color.background
+        visible: !transitionCapture.hasContent
+      }
+
+      // Unlock direction, on top of everything above: shows the current
+      // lock appearance, fading away to reveal transitionCapture's old
+      // frame underneath (not a fresh one — see unlockTransitionActive's
+      // comment).
+      LockView {
+        id: unlockFadeView
+        anchors.fill: parent
+        z: 10
+        visible: root.unlockTransitionActive
+        blurredBackgroundPath: root.blurredBackgroundPath
+        blurredBackgroundVersion: root.blurredBackgroundVersion
+        fingerprintConfigured: root.fingerprintConfigured
+        authenticatingPassword: false
+        failureMessage: ""
+        failedAttempts: 0
+        inputEnabled: false
+        loadBackground: root.unlockTransitionActive
+        passwordText: ""
+        userName: root.userName
+        timeFormat: root.timeFormat
+        dateFormat: root.dateFormat
+        opacity: root.unlockCrossfadeTrigger ? 0 : 1
+        Behavior on opacity {
+          // Shorter than the lock-entrance's 450ms — see unlockOverlayDropTimer.
+          NumberAnimation { duration: 200; easing.type: Easing.OutCubic }
+        }
       }
     }
 
-    // Covers only the brief (~60ms measured) gap before the capture above
-    // has its first frame — same Color.background the real lock surface
-    // starts from, so there's no color mismatch. Gone as soon as
-    // hasContent is true, handing off to the capture above it.
-    Rectangle {
-      anchors.fill: parent
-      color: Color.background
-      visible: !transitionCapture.hasContent
-    }
-
-    // Unlock direction, on top of everything above: shows the current lock
-    // appearance, fading away to reveal transitionCapture's old frame
-    // underneath (not a fresh one — see unlockTransitionActive's comment).
-    LockView {
-      id: unlockFadeView
-      anchors.fill: parent
-      z: 10
-      visible: root.unlockTransitionActive
-      blurredBackgroundPath: root.blurredBackgroundPath
-      blurredBackgroundVersion: root.blurredBackgroundVersion
-      fingerprintConfigured: root.fingerprintConfigured
-      authenticatingPassword: false
-      failureMessage: ""
-      failedAttempts: 0
-      inputEnabled: false
-      loadBackground: root.unlockTransitionActive
-      passwordText: ""
-      userName: root.userName
-      timeFormat: root.timeFormat
-      dateFormat: root.dateFormat
-      opacity: root.unlockCrossfadeTrigger ? 0 : 1
-      Behavior on opacity {
-        // Shorter than the lock-entrance's 450ms — see unlockOverlayDropTimer.
-        NumberAnimation { duration: 200; easing.type: Easing.OutCubic }
-      }
-    }
-
-    // Not yet protocol-secure, so input must be swallowed here explicitly.
+    // Not yet protocol-secure, so input must be swallowed here explicitly —
+    // but only while actually transitioning; otherwise this window sits
+    // mapped-but-inert and must not eat clicks meant for the real desktop
+    // or the real secure surface.
     MouseArea {
       anchors.fill: parent
+      enabled: root.transitionContentActive
       hoverEnabled: true
       acceptedButtons: Qt.AllButtons
       onClicked: {}
