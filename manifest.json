@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
-  "id": "bibek.lock",
-  "name": "Better Lock",
+  "id": "archer.lock",
+  "name": "Archer Lock",
   "version": "1.0.6",
-  "author": "Bibek Bhusal",
-  "description": "Quickshell session lock clone with date/time, power controls, and forgot password prompt.",
+  "author": "archer",
+  "description": "Personal fork of Bibek Bhusal's Better Lock: date/time, power controls, crossfade-from-desktop transition, no forgot-password prompt or media widget.",
   "homepage": "https://github.com/BibekBhusal0/omarchy-better-lock",
   "kinds": [
     "service"
@@ -14,7 +14,7 @@
     "service": "Service.qml"
   },
   "omarchy": {
-    "clonedFrom": "omarchy.lock"
+    "clonedFrom": "bibek.lock"
   },
   "defaults": {
     "timeFormat": "hh:mm AP",
